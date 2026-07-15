@@ -2,6 +2,7 @@ import {
   Injectable,
   Inject,
   UnprocessableEntityException,
+  Logger,
 } from '@nestjs/common';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -15,6 +16,7 @@ import { Order } from './entities/order.entity';
 interface CreateOrderJobData {
   orderId: string;
   productId: string;
+  email: string;
   quantity: number;
 }
 
@@ -27,6 +29,8 @@ export class OrderService {
     private readonly redisClient: Redis,
     @InjectRepository(Order)
     private readonly repository: Repository<Order>,
+    @Inject(Logger)
+    private readonly logger: Logger,
   ) {}
   async acceptOrder(createOrderDto: CreateOrderDto) {
     const productKey = `produto:${createOrderDto.productId}:estoque`;
@@ -36,6 +40,7 @@ export class OrderService {
     );
     if (newProductStock < 0) {
       await this.redisClient.incrby(productKey, createOrderDto.quantity);
+      this.logger.log(`[ORDER] REJECTED`);
       throw new UnprocessableEntityException(
         'Estoque Insuficiente para o produto solicitado',
       );
@@ -43,8 +48,9 @@ export class OrderService {
     const job = await this.orderStatusQueue.add(
       'order_approved',
       {
-        orderId: `or_${nanoid(12)}`,
+        orderId: `or_${nanoid(9)}`,
         productId: createOrderDto.productId,
+        email: createOrderDto.email,
         quantity: createOrderDto.quantity,
       },
       {
@@ -53,10 +59,11 @@ export class OrderService {
           type: 'exponential',
           delay: 2000,
         },
-        removeOnComplete: true,
+        removeOnComplete: false,
       },
     );
 
+    this.logger.log('[ORDER] AQUIRED');
     return {
       orderId: job.data.orderId,
       productId: job.data.productId,
@@ -70,6 +77,7 @@ export class OrderService {
       id: createOrder.orderId,
       product_id: createOrder.productId,
       quantity: createOrder.quantity,
+      email: createOrder.email,
       processed_at: new Date(),
     });
     return this.repository.save(order);

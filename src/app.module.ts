@@ -6,10 +6,13 @@ import { BullModule } from '@nestjs/bullmq';
 import { OrderModule } from './order/order.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { RedisModule } from './redis/redis.module';
 
 @Module({
   imports: [
+    RedisModule,
     BullModule.forRootAsync({
+      imports: [RedisModule],
       useFactory: (redisClient: Redis) => {
         return {
           //eslint-disable-next-line
@@ -27,32 +30,13 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
         type: 'postgres',
         url: configService.get('DATABASE_URL'),
         entities: [__dirname + '/**/*.entity{.ts,.js}'],
+        synchronize: true,
       }),
     }),
     OrderModule,
   ],
   controllers: [AppController],
-  providers: [
-    AppService,
-    {
-      provide: 'REDIS_CLIENT',
-      useFactory: (configService: ConfigService) => {
-        const client = new Redis(configService.get('REDIS_URL')!, {
-          tls:
-            process.env.NODE_ENV === 'production'
-              ? { rejectUnauthorized: false }
-              : undefined,
-          retryStrategy: (times) => {
-            if (times > 3) return null;
-            return Math.min(times * 50, 2000);
-          },
-        });
-
-        client.on('error', (err) => console.error('Erro Redis Cloud', err));
-        return client;
-      },
-    },
-  ],
+  providers: [AppService],
 })
 export class AppModule implements OnModuleDestroy {
   constructor(@Inject('REDIS_CLIENT') private readonly redisClient: Redis) {}
