@@ -1,98 +1,104 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# event-driven-nest-ts
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Sistema de vendas de alta concorrência inspirado em cenários de **drop de estoque limitado** (tipo Black Friday ou um restock de item raro): centenas de pessoas podem tentar comprar o mesmo produto ao mesmo tempo, e o sistema precisa garantir que **nunca** venda mais do que existe em estoque — sem deixar o banco de dados apanhar.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## O problema que este projeto resolve
 
-## Description
+Se 100 (ou 10.000) requisições batem ao mesmo tempo pedindo o último item do estoque, uma arquitetura ingênua (verificar estoque no Postgres, decidir, depois salvar) sofre de **race conditions**: múltiplas requisições podem "ver" estoque disponível ao mesmo tempo e todas passarem, vendendo mais unidades do que existem.
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+Este projeto resolve isso colocando o **Redis como porteiro** antes de qualquer operação pesada no banco:
 
-## Project setup
+1. A requisição chega na API (NestJS).
+2. O Redis executa um `DECRBY` **atômico** no contador de estoque do produto.
+3. Se o resultado for negativo, a operação é revertida (`INCRBY`) e o pedido é rejeitado — sem tocar no banco.
+4. Se houver estoque, o pedido é aceito na hora (resposta rápida ao cliente) e um **job é enfileirado no BullMQ**.
+5. Um **worker** consome essa fila em segundo plano, processando a gravação no Postgres e simulando o envio de e-mail de confirmação — de forma assíncrona, sem travar a resposta da API.
 
-```bash
-$ npm install
+Como o `DECRBY` do Redis é atômico, mesmo com dezenas de requisições concorrentes, o estoque nunca fica negativo e nenhuma venda é duplicada.
+
+## Arquitetura
+
+```
+Cliente (Postman / script de carga)
+        │
+        ▼
+   NestJS API (HTTP)
+        │
+        ├──► Redis: DECRBY estoque (gate atômico de concorrência)
+        │        │
+        │        ├── estoque < 0 → reverte (INCRBY) e rejeita (422)
+        │        └── estoque OK  → aceita (202) e segue
+        │
+        ▼
+   BullMQ Queue (order-status-queue)
+        │
+        ▼
+   Worker (OrderProcessor)
+        │
+        ├──► Postgres: grava o pedido confirmado
+        └──► Simula envio de e-mail de confirmação
 ```
 
-## Compile and run the project
+## Stack
+
+- **NestJS** — framework da API e do worker
+- **Redis (ioredis)** — gate de concorrência atômico (`DECRBY`/`INCRBY`) sobre o estoque
+- **BullMQ** — fila de processamento assíncrono, também usando Redis como broker
+- **TypeORM + PostgreSQL** — persistência dos pedidos confirmados
+- **class-validator** — validação de payload (`CreateOrderDto`)
+
+## Como rodar localmente
+
+### Pré-requisitos
+- Node 20+
+- Uma instância de Redis (local ou cloud, ex: Upstash/Redis Cloud)
+- Uma instância de Postgres (local ou cloud, ex: Neon)
+
+### Passo a passo
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+npm install
 ```
 
-## Run tests
+Configure o `.env` na raiz com:
+
+```env
+DATABASE_URL=postgres://usuario:senha@host:5432/database
+REDIS_URL=redis://usuario:senha@host:porta
+```
+
+Suba o servidor em modo desenvolvimento:
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+npm run start:dev
 ```
 
-## Deployment
+A API sobe em `http://localhost:3000`.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### Com Docker
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+docker-compose up --build
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+O `docker-compose.yml` sobe apenas a API em container; Redis e Postgres continuam sendo os serviços configurados no `.env` (não são containerizados neste projeto).
 
-## Resources
+## Endpoint principal
 
-Check out a few resources that may come in handy when working with NestJS:
+**POST** `/order`
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+```json
+{
+  "productId": "8IERhqSGrGXt",
+  "quantity": 1,
+  "email": "cliente@teste.com"
+}
+```
 
-## Support
+Respostas:
+- `202 Accepted` — pedido aceito, estoque reservado, job enfileirado
+- `422 Unprocessable Entity` — estoque insuficiente para o produto
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+- [ ] Testes automatizados (unit + e2e) do fluxo de concorrência
+- [ ] Dashboard de monitoramento da fila (Bull Board)
+- [ ] Endpoint de consulta de status do pedido
