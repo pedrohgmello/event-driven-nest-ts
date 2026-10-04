@@ -12,10 +12,6 @@ import Redis from 'ioredis';
       useFactory: (configService: ConfigService) => {
         const client = new Redis(configService.get('REDIS_URL')!, {
           maxRetriesPerRequest: null,
-          tls:
-            process.env.NODE_ENV === 'production'
-              ? { rejectUnauthorized: false }
-              : undefined,
           retryStrategy: (times) => {
             if (times > 3) return null;
             return Math.min(times * 50, 2000);
